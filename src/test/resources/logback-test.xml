@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- 测试环境只输出到控制台 -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 项目包日志级别 -->
+    <logger name="com.zq" level="INFO" />
+    
+    <!-- WebSocket库日志级别（减少噪音） -->
+    <logger name="org.java_websocket" level="WARN" />
+    
+    <!-- Spring框架日志级别 -->
+    <logger name="org.springframework" level="WARN" />
+    <logger name="org.mongodb" level="WARN" />
+
+    <!-- 根日志级别 -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+    </root>
+</configuration>
+

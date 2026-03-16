@@ -1,0 +1,19 @@
+spring:
+  data:
+    mongodb:
+      uri: mongodb://admin:admin123@localhost:27017/strategy_db?authSource=admin
+      auto-index-creation: true
+
+# 注意：币安API配置已移至数据库中
+# 测试将从数据库的 strategy_config 集合读取配置
+# 配置ID格式：{symbol}_{mode}，例如：USDCUSDT_TESTNET
+
+logging:
+  level:
+    root: INFO
+    com.zq: DEBUG
+    org.springframework: WARN
+    org.mongodb: WARN
+
+stats:
+  async: false
