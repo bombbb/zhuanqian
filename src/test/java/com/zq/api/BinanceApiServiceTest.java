@@ -17,12 +17,12 @@ import static org.junit.jupiter.api.Assertions.*;
 class BinanceApiServiceTest {
     
     private BinanceApiService apiService;
-    
+
     // 测试网配置（从usdt项目提取）
     private static final String TESTNET_API_URL = "https://testnet.binance.vision";
     private static final String TESTNET_API_KEY = "J2rlMxM3JWtzxe2acUIPe5crXVW3teXtYnjlgT6U4f8jNwE7CefuGGK9HxnSr28k";
     private static final String TESTNET_SECRET_KEY = "HTCxeF2FOEv4qL0nzvll1ysydZPCTSSJdShWY8llNhOkalTuL6wAv2VpSUHIlc8V";
-    
+
     @BeforeEach
     void setUp() {
         // 初始化API服务（使用测试网）

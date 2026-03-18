@@ -26,7 +26,29 @@ public class OrderService {
     private MongoTemplate mongoTemplate;
     
     /**
-     * 创建订单
+     * 创建订单（同步，用于关键交易路径）
+     * 在 API 调用成功后立即同步创建订单记录，确保数据一致性
+     * @return 成功返回订单，失败抛出异常
+     */
+    public Order createOrderSync(Order order) {
+        order.setCreateTime(LocalDateTime.now());
+        if (order.getStatus() == null) {
+            order.setStatus(Order.OrderStatus.NEW);
+        }
+
+        try {
+            Order savedOrder = mongoTemplate.insert(order);
+            log.info("Order created synchronously: id={}, symbol={}, side={}, price={}",
+                savedOrder.getId(), savedOrder.getSymbol(), savedOrder.getSide(), savedOrder.getPrice());
+            return savedOrder;
+        } catch (Exception e) {
+            log.error("Failed to create order synchronously: id={}", order.getId(), e);
+            throw new RuntimeException("Failed to create order record: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 创建订单（异步，用于非关键操作）
      * 使用虚拟线程异步插入数据库
      */
     public Order createOrder(Order order) {
@@ -34,18 +56,18 @@ public class OrderService {
         if (order.getStatus() == null) {
             order.setStatus(Order.OrderStatus.NEW);
         }
-        
+
         // 使用虚拟线程异步插入
         Thread.startVirtualThread(() -> {
             try {
                 mongoTemplate.insert(order);
-                log.info("Order created: id={}, symbol={}, side={}, price={}", 
+                log.info("Order created: id={}, symbol={}, side={}, price={}",
                     order.getId(), order.getSymbol(), order.getSide(), order.getPrice());
             } catch (Exception e) {
                 log.error("Failed to create order: {}", order.getId(), e);
             }
         });
-        
+
         return order;
     }
     

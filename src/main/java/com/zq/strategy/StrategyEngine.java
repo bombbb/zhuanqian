@@ -2,9 +2,13 @@ package com.zq.strategy;
 
 import com.zq.api.BinanceApiService;
 import com.zq.api.BinanceOrder;
+import com.zq.api.ConnectionStatusService;
 import com.zq.api.TickerData;
 import com.zq.order.Order;
+import com.zq.order.OrderLockService;
 import com.zq.order.OrderService;
+import com.zq.order.RetryService;
+import com.zq.position.DailyLossTracker;
 import com.zq.position.PositionService;
 import com.zq.stats.StatsService;
 import jakarta.annotation.PostConstruct;
@@ -37,15 +41,27 @@ public class StrategyEngine {
     
     @Resource
     private BinanceApiService apiService;
-    
+
+    @Resource
+    private ConnectionStatusService connectionStatusService;
+
     @Resource
     private OrderService orderService;
-    
+
+    @Resource
+    private OrderLockService orderLockService;
+
+    @Resource
+    private RetryService retryService;
+
     @Resource
     private PositionService positionService;
-    
+
     @Resource
     private StatsService statsService;
+
+    @Resource
+    private DailyLossTracker dailyLossTracker;
     
     @Resource
     private DepthAnalyzer depthAnalyzer;
@@ -329,16 +345,37 @@ public class StrategyEngine {
             if (!config.isEnabled()) {
                 return;
             }
-            
+
+            // 1.1 检查 WebSocket 连接状态
+            if (!connectionStatusService.isAllConnectionsActive()) {
+                int activeCount = connectionStatusService.getActiveConnectionCount();
+                int totalCount = connectionStatusService.getTotalConnectionCount();
+                if (totalCount > 0 && activeCount < totalCount) {
+                    log.warn("✗ WebSocket connection not active: {}/{} connections active, skipping trading",
+                        activeCount, totalCount);
+                }
+                return;
+            }
+
             String symbol = config.getSymbol();
             double lastPrice = ticker.getLastPrice().doubleValue();
             double bid = ticker.getBestBidPrice().doubleValue();
             double ask = ticker.getBestAskPrice().doubleValue();
-            
+
             // 更新最近的市场价格
             lastMarketPrice = lastPrice;
-            
-            // 2. 异步记录价差统计
+
+            // 2. 检查每日止损
+            if (dailyLossTracker.shouldStopTrading(symbol, config.getDailyLossLimit(), config.getDailyDrawdownThreshold())) {
+                com.zq.position.DailyLossTracker.DailyStats stats = dailyLossTracker.getTodayStats(symbol);
+                log.warn("✗ Trading stopped due to daily loss limit: symbol={}, totalPnl={}U, limit={}U, peakPnl={}U",
+                    symbol, String.format("%.2f", stats.getTotalPnl()),
+                    String.format("%.2f", config.getDailyLossLimit()),
+                    String.format("%.2f", stats.getPeakPnl()));
+                return;
+            }
+
+            // 3. 异步记录价差统计
             statsService.recordSpread(symbol, bid, ask);
             
             // 3. 计算支撑比率
@@ -531,21 +568,27 @@ public class StrategyEngine {
      * @param orderAmount 本次订单金额（USDT）
      */
     private void executeBuy(StrategyConfig config, TickerData ticker, double orderAmount) {
+        String symbol = config.getSymbol();
+
+        // 使用分布式锁防止并发下单（超时5秒）
+        if (!orderLockService.tryLock(symbol, 5000)) {
+            log.warn("✗ Cannot place order: failed to acquire lock for symbol={}, another order in progress", symbol);
+            return;
+        }
+
         try {
-            String symbol = config.getSymbol();
-            
             // 下单前检查挂单数量
             if (!checkAndCleanupOrders(symbol)) {
                 log.warn("✗ Cannot place order: too many open orders after cleanup");
                 return;
             }
-            
+
             double buyPrice = ticker.getBestBidPrice().doubleValue();  // 使用当前买价下限价单
             double quantity = orderAmount / buyPrice;
-            
+
             // 根据交易规则调整数量，同时验证 NOTIONAL 要求
             quantity = apiService.adjustQuantityAndNotional(symbol, quantity, buyPrice);
-            
+
             // 严格控制最大下单金额（防止 NOTIONAL 调整后放大）
             double maxOrderAmount = Math.min(orderAmount, config.getMaxBuyAmountUsdt());
             double notional = quantity * buyPrice;
@@ -554,28 +597,28 @@ public class StrategyEngine {
                 double stepSize = filter.getStepSize();
                 double capQty = Math.floor((maxOrderAmount / buyPrice) / stepSize) * stepSize;
                 capQty = apiService.adjustQuantityDown(symbol, capQty);
-                
+
                 if (capQty <= 0 || capQty < filter.getMinQty()) {
                     log.warn("✗ Cannot place order: capQty below minQty (capQty={}, minQty={}, maxOrderAmount={})",
                         capQty, filter.getMinQty(), maxOrderAmount);
                     return;
                 }
-                
+
                 double minNotional = filter.getMinNotional();
                 if (minNotional > 0 && capQty * buyPrice < minNotional) {
                     log.warn("✗ Cannot place order: minNotional not met after cap (capQty={}, price={}, minNotional={})",
                         capQty, buyPrice, minNotional);
                     return;
                 }
-                
+
                 quantity = capQty;
                 notional = quantity * buyPrice;
             }
-            
+
             // 下限价买单
             var result = apiService.placeLimitOrder(symbol, "BUY", quantity, buyPrice);
-            
-            // 记录订单
+
+            // 记录订单（同步，确保数据一致性）
             Order order = new Order();
             order.setId(UUID.randomUUID().toString());
             order.setSymbol(symbol);
@@ -585,7 +628,20 @@ public class StrategyEngine {
             order.setQuantity(quantity);
             order.setOrderId(result.getOrderId());
             order.setStatus(Order.OrderStatus.SUBMITTED);
-            orderService.createOrder(order);
+
+            try {
+                orderService.createOrderSync(order);
+            } catch (Exception e) {
+                // 本地订单创建失败，尝试撤销交易所订单
+                log.error("Failed to create local order, attempting to cancel exchange order: orderId={}", result.getOrderId(), e);
+                try {
+                    apiService.cancelOrder(symbol, result.getOrderId());
+                    log.warn("Exchange order canceled due to local record failure: orderId={}", result.getOrderId());
+                } catch (Exception cancelEx) {
+                    log.error("Failed to cancel exchange order after local record failure: orderId={}", result.getOrderId(), cancelEx);
+                }
+                throw new RuntimeException("Failed to create local order record", e);
+            }
             
             // 使用TRADE logger记录下单日志
             org.slf4j.Logger tradeLogger = org.slf4j.LoggerFactory.getLogger("TRADE");
@@ -595,14 +651,17 @@ public class StrategyEngine {
             
             // 启动监控线程，等待成交后挂卖单
             monitorOrderFill(order.getId(), config);
-            
+
         } catch (Exception e) {
             if (isInsufficientBalanceError(e)) {
                 markInsufficientBalanceCooldown();
-                log.warn("Insufficient balance detected, enter cooldown {}s", 
+                log.warn("Insufficient balance detected, enter cooldown {}s",
                     INSUFFICIENT_BALANCE_COOLDOWN_MS / 1000);
             }
             log.error("Failed to execute buy order", e);
+        } finally {
+            // 释放锁
+            orderLockService.unlock(symbol);
         }
     }
     
@@ -665,8 +724,8 @@ public class StrategyEngine {
             
             // 下限价卖单
             var result = apiService.placeLimitOrder(symbol, "SELL", quantity, sellPrice);
-            
-            // 记录订单
+
+            // 记录订单（同步，确保数据一致性）
             Order order = new Order();
             order.setId(UUID.randomUUID().toString());
             order.setSymbol(symbol);
@@ -676,7 +735,15 @@ public class StrategyEngine {
             order.setQuantity(quantity);
             order.setOrderId(result.getOrderId());
             order.setStatus(Order.OrderStatus.SUBMITTED);
-            orderService.createOrder(order);
+
+            try {
+                orderService.createOrderSync(order);
+            } catch (Exception e) {
+                // 本地订单创建失败，但买单已经成交，需要记录日志
+                log.error("Failed to create local sell order record (buy already filled): orderId={}, localId={}",
+                    result.getOrderId(), order.getId(), e);
+                // 卖单在交易所已存在，不能撤销，只能继续
+            }
             
             // 关联买卖单
             orderService.linkOrders(relatedBuyOrderId, order.getId());
@@ -862,76 +929,121 @@ public class StrategyEngine {
     /**
      * 检查并清理挂单
      * 如果挂单数量超过阈值，清理最旧的挂单
-     * 
+     *
      * @param symbol 交易对
      * @return true 如果可以继续下单，false 如果挂单数量仍然过多
      */
     private boolean checkAndCleanupOrders(String symbol) {
+        return retryService.executeWithRetry(
+            () -> doCheckAndCleanupOrders(symbol),
+            "CheckAndCleanupOrders-" + symbol,
+            3,  // 最大重试3次
+            1000,  // 初始延迟1秒
+            5000,  // 最大延迟5秒
+            2.0    // 退避倍数
+        );
+    }
+
+    /**
+     * 实际执行检查和清理挂单的逻辑
+     */
+    private boolean doCheckAndCleanupOrders(String symbol) {
         try {
             // 从币安API查询实际挂单数量
             int openOrdersCount = apiService.checkOpenOrdersCount(symbol);
-            
+
             // 如果未超过阈值，直接返回
             if (openOrdersCount < MAX_OPEN_ORDERS_THRESHOLD) {
                 return true;
             }
-            
-            log.warn("⚠ Open orders count ({}) exceeds threshold ({}), cleaning up...", 
+
+            log.warn("⚠ Open orders count ({}) exceeds threshold ({}), cleaning up...",
                 openOrdersCount, MAX_OPEN_ORDERS_THRESHOLD);
-            
+
             // 计算需要清理的数量
             int cleanupCount = Math.min(CLEANUP_BATCH_SIZE, openOrdersCount - TARGET_OPEN_ORDERS);
-            
+
             // 从本地数据库获取最旧的挂单
             List<Order> oldestOrders = orderService.getOldestOpenOrders(symbol, cleanupCount);
-            
+
             if (oldestOrders.isEmpty()) {
                 log.warn("No old orders found in local database, syncing with Binance...");
-                // 如果本地没有数据，从币安API获取
-                List<BinanceOrder> binanceOrders = apiService.getOpenOrders(symbol);
-                if (!binanceOrders.isEmpty()) {
-                    // 取前 cleanupCount 个订单撤销
-                    List<Long> orderIdsToCancel = binanceOrders.stream()
-                        .limit(cleanupCount)
-                        .map(BinanceOrder::getOrderId)
-                        .toList();
-                    
-                    int canceledCount = apiService.cancelOrders(symbol, orderIdsToCancel);
-                    log.info("Cleaned up {} orders from Binance API", canceledCount);
-                    
-                    return canceledCount > 0;
-                }
-                return false;
+                return cleanupFromBinanceApi(symbol, cleanupCount);
             }
-            
-            // 批量撤销订单
+
+            // 批量���销订单（使用重试机制）
             List<Long> orderIdsToCancel = oldestOrders.stream()
                 .filter(order -> order.getOrderId() != null && order.getOrderId() > 0)
                 .map(Order::getOrderId)
                 .toList();
-            
+
             if (orderIdsToCancel.isEmpty()) {
                 log.warn("No valid order IDs to cancel");
                 return false;
             }
-            
-            int canceledCount = apiService.cancelOrders(symbol, orderIdsToCancel);
-            
+
+            // 使用重试机制批量撤单
+            int canceledCount = retryService.executeBatchWithRetry(
+                orderIdsToCancel,
+                orderId -> {
+                    apiService.cancelOrder(symbol, orderId);
+                    log.debug("Successfully canceled order: {}", orderId);
+                },
+                "CancelOrder-" + symbol,
+                3  // 每个订单最多重试3次
+            );
+
             // 更新本地订单状态
             for (Order order : oldestOrders) {
                 if (order.getOrderId() != null && order.getOrderId() > 0) {
                     orderService.markOrderCanceled(order.getId());
                 }
             }
-            
+
             log.info("✓ Cleaned up {} old orders, target reached", canceledCount);
-            
+
             // 检查清理后的数量
             int remainingCount = apiService.checkOpenOrdersCount(symbol);
             return remainingCount < MAX_OPEN_ORDERS_THRESHOLD;
-            
+
         } catch (Exception e) {
             log.error("Error checking/cleaning up orders", e);
+            return false;
+        }
+    }
+
+    /**
+     * 从币安API获取并清理挂单
+     */
+    private boolean cleanupFromBinanceApi(String symbol, int cleanupCount) {
+        try {
+            List<BinanceOrder> binanceOrders = apiService.getOpenOrders(symbol);
+            if (!binanceOrders.isEmpty()) {
+                // 取前 cleanupCount 个订单撤销
+                List<Long> orderIdsToCancel = binanceOrders.stream()
+                    .limit(cleanupCount)
+                    .map(BinanceOrder::getOrderId)
+                    .filter(id -> id != null && id > 0)
+                    .toList();
+
+                if (orderIdsToCancel.isEmpty()) {
+                    return false;
+                }
+
+                // 使用重试机制批量撤单
+                int canceledCount = retryService.executeBatchWithRetry(
+                    orderIdsToCancel,
+                    orderId -> apiService.cancelOrder(symbol, orderId),
+                    "CancelOrderFromAPI-" + symbol,
+                    3
+                );
+
+                log.info("Cleaned up {} orders from Binance API", canceledCount);
+                return canceledCount > 0;
+            }
+            return false;
+        } catch (Exception e) {
+            log.error("Error cleaning up from Binance API", e);
             return false;
         }
     }
@@ -974,10 +1086,13 @@ public class StrategyEngine {
                 
                 // 计算持仓时间（秒）
                 int holdSeconds = (int) Duration.between(buyOrder.getFillTime(), sellTime).getSeconds();
-                
+
                 // 计算滑点（使用买单的滑点，卖单滑点对盈亏影响较小）
                 double slippage = buyOrder.getSlippage() != null ? buyOrder.getSlippage() : 0.0;
-                
+
+                // 记录每日损失跟踪
+                dailyLossTracker.recordTrade(sellOrder.getSymbol(), pnl);
+
                 // 记录交易统计
                 statsService.recordTrade(sellOrder.getSymbol(), pnl, holdSeconds, slippage);
                 

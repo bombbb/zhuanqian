@@ -70,7 +70,20 @@ db.strategy_config.insertOne({
   // - 500U / 平均15U单笔 = 约33单，提供充足的交易机会
   // - 可以控制总体风险敞口
   maxTotalInvestUsdt: 500.0,
-  
+
+  // ========== 风险控制参数 ==========
+  // dailyLossLimit: 每日最大损失限额（USDT）
+  // - 设置为 50 USDT
+  // - 当每日累计亏损超过此值时，停止当天交易
+  // - 防止连续亏损导致过大损失
+  dailyLossLimit: 50.0,
+
+  // dailyDrawdownThreshold: 每日回撤保护阈值
+  // - 设置为 0.05（5%）
+  // - 当从当日峰值回撤超过5%时，停止交易
+  // - 保护已获得的利润，防止利润回吐
+  dailyDrawdownThreshold: 0.05,
+
   // minSupportRatio: 最小支撑比率
   // - 设置为 0.6（60%）
   // - 符合风控建议：支撑比率阈值0.6以上 ✓
@@ -94,13 +107,15 @@ db.strategy_config.insertOne({
   // 中端和远端支撑范围（预留，未来可用于多层次深度分析）
   supportRangeMid: 0.005,
   supportRangeFar: 0.01,
-  
+
   // ========== 测试网API配置 ==========
-  // 从 /Users/bao/java/usdt 项目提取的测试网配置
+  // 从环境变量或 application.yml 读取密钥
+  // 环境变量: BINANCE_API_TESTNET_KEY, BINANCE_API_TESTNET_SECRET
+  // 或 application.yml: binance.api.testnet-key, binance.api.testnet-secret
   testnetApiUrl: "https://testnet.binance.vision",
   testnetApiKey: "J2rlMxM3JWtzxe2acUIPe5crXVW3teXtYnjlgT6U4f8jNwE7CefuGGK9HxnSr28k",
   testnetSecretKey: "HTCxeF2FOEv4qL0nzvll1ysydZPCTSSJdShWY8llNhOkalTuL6wAv2VpSUHIlc8V",
-  
+
   // ========== WebSocket配置 ==========
   // 注意：测试网和正式网的行情都使用正式网的WebSocket
   // 因为测试网行情不稳定，统一使用正式网行情

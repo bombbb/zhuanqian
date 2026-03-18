@@ -55,7 +55,17 @@ public class StrategyConfig {
     
     // 最大总投入金额限制
     private double maxTotalInvestUsdt;
-    
+
+    // ========== 风险控制参数 ==========
+
+    // 每日最大损失限额（USDT）
+    // 超过此值后停止当天的交易
+    private double dailyLossLimit = 50.0;
+
+    // 每日回撤保护（从峰值回撤的百分比）
+    // 例如：0.05 表示从当天最高盈利回撤5%后停止交易
+    private double dailyDrawdownThreshold = 0.05;
+
     // ========== 深度分析参数 ==========
     
     // 最小支撑比率（0-1）
@@ -73,7 +83,7 @@ public class StrategyConfig {
     private String productionApiUrl;
     private String productionApiKey;
     private String productionSecretKey;
-    
+
     // WebSocket URL配置
     // 注意：测试网和正式网的行情都使用正式网的WebSocket
     private String marketDataWsUrl;  // 行情WebSocket URL，默认使用正式网

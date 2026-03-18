@@ -13,22 +13,34 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Binance WebSocket客户端
- * 
+ *
  * 负责与Binance WebSocket服务器建立连接，接收实时市场数据
  * 具备自动重连机制，确保连接稳定性
  * 支持单流和组合流两种模式
- * 
+ *
  * 功能：
  * - 建立和维护WebSocket连接
  * - 接收服务器推送的市场数据（支持组合流格式）
  * - 自动重连（最多10次）
  * - 将接收到的数据传递给MarketDataHandler处理
- * 
+ * - 连接状态跟踪和通知
+ *
  * 组合流格式：
  * - URL: wss://stream.binance.com:9443/stream?streams=usdcusdt@ticker/tusdusdt@ticker
  * - 消息格式: {"stream":"usdcusdt@ticker","data":{...}}
  */
 public class BinanceWebSocketClient extends WebSocketClient {
+
+    /**
+     * 连接状态监听器接口
+     */
+    public interface ConnectionStateListener {
+        /**
+         * 连接状态变化时调用
+         * @param active true表示连接可用，false表示连接断开
+         */
+        void onConnectionStateChanged(boolean active);
+    }
     private static final Logger logger = LoggerFactory.getLogger(BinanceWebSocketClient.class);
     
     /** 市场数据处理器 */
@@ -42,7 +54,16 @@ public class BinanceWebSocketClient extends WebSocketClient {
     
     /** 是否应该自动重连 */
     private volatile boolean shouldReconnect = true;
-    
+
+    /** 连接是否可用（已连接且数据正常） */
+    private volatile boolean connectionActive = false;
+
+    /** 上次连接状态变化时间 */
+    private volatile long lastStateChangeTime = System.currentTimeMillis();
+
+    /** 连接状态监听器 */
+    private volatile ConnectionStateListener stateListener;
+
     /** 当前重连尝试次数 */
     private volatile int reconnectAttempts = 0;
     
@@ -92,15 +113,19 @@ public class BinanceWebSocketClient extends WebSocketClient {
 
     /**
      * WebSocket连接成功回调
-     * 
+     *
      * 当连接建立成功时调用，重置重连计数器
-     * 
+     *
      * @param handshake 服务器握手信息
      */
     @Override
     public void onOpen(ServerHandshake handshake) {
         logger.info("WebSocket connection established successfully: {}", streamName);
         reconnectAttempts = 0;
+
+        // 更新连接状态
+        setConnectionActive(true);
+
         logger.info("Connection ready, waiting for market data...");
     }
 
@@ -137,9 +162,12 @@ public class BinanceWebSocketClient extends WebSocketClient {
      */
     @Override
     public void onClose(int code, String reason, boolean remote) {
-        logger.warn("WebSocket connection closed: {} (code: {}, reason: {}, remote: {})", 
+        logger.warn("WebSocket connection closed: {} (code: {}, reason: {}, remote: {})",
                 streamName, code, reason, remote);
-        
+
+        // 更新连接状态
+        setConnectionActive(false);
+
         // 错误代码 1006 表示异常关闭（abnormal closure），可能是：
         // 1. 网络中断（如电脑熄屏导致）
         // 2. 服务器端主动关闭连接
@@ -147,23 +175,23 @@ public class BinanceWebSocketClient extends WebSocketClient {
         if (code == 1006) {
             logger.warn("Abnormal closure detected (code 1006), possible causes: network interruption, server-side close, or timeout");
         }
-        
+
         if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
             reconnectAttempts++;
-            logger.info("Scheduling reconnect attempt ({}/{}): {} (delay: {}ms)", 
+            logger.info("Scheduling reconnect attempt ({}/{}): {} (delay: {}ms)",
                     reconnectAttempts, MAX_RECONNECT_ATTEMPTS, streamName, RECONNECT_DELAY_MS);
-            
+
             // 在单独的线程中执行重连，避免在 WebSocket 线程中调用 reconnect()
             reconnectExecutor.schedule(() -> {
                 try {
                     logger.info("Executing reconnect: {}", streamName);
-                    reconnect();
+                    this.reconnect();
                 } catch (Exception e) {
                     logger.error("Reconnect failed: {}", streamName, e);
                 }
             }, RECONNECT_DELAY_MS, TimeUnit.MILLISECONDS);
         } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            logger.error("Max reconnect attempts ({}) reached, stopping reconnect: {}", 
+            logger.error("Max reconnect attempts ({}) reached, stopping reconnect: {}",
                     MAX_RECONNECT_ATTEMPTS, streamName);
         }
     }
@@ -253,11 +281,58 @@ public class BinanceWebSocketClient extends WebSocketClient {
 
     /**
      * 获取流名称
-     * 
+     *
      * @return 流名称
      */
     public String getStreamName() {
         return streamName;
+    }
+
+    /**
+     * 检查连接是否可用
+     *
+     * @return true 表示连接可用，false 表示连接断开
+     */
+    public boolean isConnectionActive() {
+        return connectionActive && this.isOpen();
+    }
+
+    /**
+     * 设置连接状态监听器
+     *
+     * @param listener 连接状态监听器
+     */
+    public void setStateListener(ConnectionStateListener listener) {
+        this.stateListener = listener;
+    }
+
+    /**
+     * 更新连接状态并通知监听器
+     */
+    private void setConnectionActive(boolean active) {
+        if (this.connectionActive != active) {
+            this.connectionActive = active;
+            this.lastStateChangeTime = System.currentTimeMillis();
+            logger.info("Connection state changed: {} -> {}", this.connectionActive ? "DISCONNECTED" : "CONNECTED", active ? "CONNECTED" : "DISCONNECTED");
+
+            // 通知监听器
+            if (stateListener != null) {
+                try {
+                    stateListener.onConnectionStateChanged(active);
+                } catch (Exception e) {
+                    logger.error("Error notifying connection state listener", e);
+                }
+            }
+        }
+    }
+
+    /**
+     * 获取上次状态变化时间
+     *
+     * @return 上次状态变化的毫秒时间戳
+     */
+    public long getLastStateChangeTime() {
+        return lastStateChangeTime;
     }
 
     /**

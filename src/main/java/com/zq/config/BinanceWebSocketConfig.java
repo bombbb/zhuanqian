@@ -1,6 +1,7 @@
 package com.zq.config;
 
 import com.zq.api.BinanceWebSocketClient;
+import com.zq.api.ConnectionStatusService;
 import com.zq.api.MarketDataHandler;
 import com.zq.strategy.StrategyConfig;
 import com.zq.strategy.StrategyService;
@@ -22,13 +23,16 @@ import java.net.URI;
 @Profile("!test")
 @Slf4j
 public class BinanceWebSocketConfig {
-    
+
     @Autowired
     private StrategyService strategyService;
-    
+
     @Autowired
     private MarketDataHandler marketDataHandler;
-    
+
+    @Autowired
+    private ConnectionStatusService connectionStatusService;
+
     private BinanceWebSocketClient webSocketClient;
     
     /**
@@ -95,7 +99,10 @@ public class BinanceWebSocketConfig {
             
             // 创建WebSocket客户端
             webSocketClient = new BinanceWebSocketClient(serverUri, symbol + "@ticker", marketDataHandler);
-            
+
+            // 注册到连接状态服务
+            connectionStatusService.registerClient(webSocketClient);
+
             // 建立连接
             webSocketClient.connect();
             log.info("WebSocket connection initiated for symbol: {}", config.getSymbol());
