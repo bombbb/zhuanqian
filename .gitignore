@@ -49,3 +49,7 @@ logs/
 run/mongo-data/
 run/*.pid
 data/*.mv.db
+
+### Java ###
+.sdkmanrc
+.java-version
